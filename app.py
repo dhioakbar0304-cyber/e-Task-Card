@@ -458,6 +458,7 @@ _defaults = {
     "section_idx": 0,
     "responses": {},
     "remarks": {},
+    "completed_at": {},
     "submitted_at": None,
     "staff_snapshot": None,
     "station_final": "CGK",
@@ -633,14 +634,35 @@ def render_item(item):
                         key=f"radio_{code}", label_visibility="collapsed")
         st.session_state.responses[code] = val
         complete = val not in ("⚠️ Not Inspected", "⚠️ Not Completed")
+
+        if complete and code not in st.session_state.completed_at:
+            st.session_state.completed_at[code] = datetime.now().strftime("%H:%M:%S")
+        elif not complete:
+            st.session_state.completed_at.pop(code, None)
+
         if val == "❌ FAIL":
             remark = st.text_area("Finding remarks (required)", key=f"remark_{code}",
                                    placeholder="Describe the finding, condition, and corrective action taken...")
             st.session_state.remarks[code] = remark
             if not remark.strip():
                 complete = False
+
+            action = st.radio("Corrective action", options=["Rectified prior to release", "Deferred under MEL/CDL"],
+                               horizontal=True, key=f"action_{code}", label_visibility="visible")
+            st.session_state.responses[f"{code}__action"] = action
+
+            if action == "Deferred under MEL/CDL":
+                mel_ref = st.text_input("MEL / CDL reference number (required)", key=f"mel_{code}",
+                                         placeholder="e.g. MEL 32-40-01A")
+                st.session_state.responses[f"{code}__mel"] = mel_ref
+                if not mel_ref.strip():
+                    complete = False
+            else:
+                st.session_state.responses[f"{code}__mel"] = ""
         else:
             st.session_state.remarks[code] = ""
+            st.session_state.responses[f"{code}__action"] = ""
+            st.session_state.responses[f"{code}__mel"] = ""
         st.markdown("</div>", unsafe_allow_html=True)
         return complete
 
@@ -743,6 +765,77 @@ def render_equipment_section(section):
     remarks = edited["Remark"].fillna("").astype(str).str.strip()
     return bool((remarks != "").all()) and len(remarks) > 0
 
+def section_status(section, mode):
+    """Read-only status check (no widgets created) — used by the page navigator."""
+    if mode == "equipment_log":
+        df = st.session_state.responses.get(f"eq_{section['no']}")
+        if df is None:
+            return "pending"
+        remarks = df["Remark"].fillna("").astype(str).str.strip()
+        return "done" if len(remarks) and (remarks != "").all() else "partial"
+
+    touched, all_done = False, True
+    for it in section["items"]:
+        code = it.get("code")
+        if it["kind"] == "check":
+            val = st.session_state.responses.get(code)
+            if val is None:
+                all_done = False
+                continue
+            touched = True
+            if val in ("⚠️ Not Inspected", "⚠️ Not Completed"):
+                all_done = False
+            if val == "❌ FAIL":
+                if not st.session_state.remarks.get(code, "").strip():
+                    all_done = False
+                if st.session_state.responses.get(f"{code}__action") == "Deferred under MEL/CDL" \
+                        and not st.session_state.responses.get(f"{code}__mel", "").strip():
+                    all_done = False
+        elif it["kind"] == "measurement":
+            if st.session_state.responses.get(code) is None:
+                all_done = False
+            else:
+                touched = True
+        elif it["kind"] == "finding":
+            if code not in st.session_state.responses:
+                all_done = False
+            else:
+                touched = True
+        elif it["kind"] == "table":
+            df = st.session_state.responses.get(code)
+            if df is None:
+                all_done = False
+            else:
+                touched = True
+                for r in it["required_rows"]:
+                    if r in df.index and df.loc[r].isna().any():
+                        all_done = False
+    if not touched:
+        return "pending"
+    return "done" if all_done else "partial"
+
+def render_navigator(sections, mode, current_idx):
+    with st.expander(f"📑 Task Card Navigator ({current_idx + 1} / {len(sections)})", expanded=False):
+        st.caption("Jump back to any page you've already started to review or correct an entry. Pages ahead of your progress stay locked until the current page is complete.")
+        for i, s in enumerate(sections):
+            status = section_status(s, mode)
+            if i == current_idx:
+                dot, label_extra = "🔵", " (current)"
+            elif status == "done":
+                dot, label_extra = "🟢", ""
+            elif status == "partial":
+                dot, label_extra = "🟡", " (incomplete)"
+            else:
+                dot, label_extra = "⚪", ""
+            can_jump = (i <= current_idx) or status in ("done", "partial")
+            cols = st.columns([0.08, 0.72, 0.2])
+            cols[0].markdown(dot)
+            cols[1].markdown(f"**{s['no']}. {s['title']}**{label_extra}")
+            if i != current_idx and can_jump:
+                if cols[2].button("Go", key=f"nav_{i}", use_container_width=True):
+                    st.session_state.section_idx = i
+                    st.rerun()
+
 # ============================================================================
 # STEP 0 — WORK ORDER / SELECT TASK CARD
 # ============================================================================
@@ -773,6 +866,7 @@ if st.session_state.step == 0:
         st.session_state.section_idx = 0
         st.session_state.responses = {}
         st.session_state.remarks = {}
+        st.session_state.completed_at = {}
 
     n_sections = len(card["sections"])
     st.info(f"📋 **{job_card_type}** contains **{n_sections} inspection pages**. Each page must be completed in full before the next page can be opened.")
@@ -794,6 +888,7 @@ elif st.session_state.step == 1:
     section = sections[idx]
 
     st.progress((idx) / len(sections), text=f"Page {idx + 1} of {len(sections)}")
+    render_navigator(sections, mode, idx)
     st.markdown(f"<div class='sub-header'><span class='sh-icon'>{icon(section.get('icon', 'clipboard'), 14)}</span>{section['no']}. {section['title']}</div>", unsafe_allow_html=True)
 
     if mode == "equipment_log":
@@ -957,6 +1052,67 @@ elif st.session_state.step == 3:
             </div>
         </div>
     """, unsafe_allow_html=True)
+
+    # ---- Build a downloadable compliance record (CSV) ----
+    records = []
+    if mode == "checklist":
+        for s in sections:
+            for it in s["items"]:
+                code = it.get("code")
+                if it["kind"] == "check":
+                    records.append({
+                        "Section": f"{s['no']}. {s['title']}", "Code": code, "Skill": it["skill"],
+                        "Description": it["desc"], "Status": st.session_state.responses.get(code, ""),
+                        "Remark": st.session_state.remarks.get(code, ""),
+                        "Corrective Action": st.session_state.responses.get(f"{code}__action", ""),
+                        "MEL/CDL Ref": st.session_state.responses.get(f"{code}__mel", ""),
+                        "Completed At": st.session_state.completed_at.get(code, ""),
+                    })
+                elif it["kind"] == "measurement":
+                    records.append({
+                        "Section": f"{s['no']}. {s['title']}", "Code": code, "Skill": it["skill"],
+                        "Description": it["label"], "Status": st.session_state.responses.get(code, ""),
+                        "Remark": "", "Corrective Action": "", "MEL/CDL Ref": "",
+                        "Completed At": st.session_state.completed_at.get(code, ""),
+                    })
+                elif it["kind"] == "finding":
+                    records.append({
+                        "Section": f"{s['no']}. {s['title']}", "Code": code, "Skill": it["skill"],
+                        "Description": it["label"], "Status": st.session_state.responses.get(code, "NIL"),
+                        "Remark": "", "Corrective Action": "", "MEL/CDL Ref": "",
+                        "Completed At": "",
+                    })
+                elif it["kind"] == "table":
+                    df = st.session_state.responses.get(code)
+                    if df is not None:
+                        for r in df.index:
+                            for c in df.columns:
+                                records.append({
+                                    "Section": f"{s['no']}. {s['title']}", "Code": f"{code} / {r} / {c}",
+                                    "Skill": it["skill"], "Description": it["label"],
+                                    "Status": df.loc[r, c], "Remark": "", "Corrective Action": "",
+                                    "MEL/CDL Ref": "", "Completed At": "",
+                                })
+    else:
+        for s in sections:
+            df = st.session_state.responses.get(f"eq_{s['no']}")
+            if df is not None:
+                for _, row in df.iterrows():
+                    records.append({
+                        "Section": s["title"], "Code": row["Equipment"], "Skill": "",
+                        "Description": row["Description"], "Status": row["Remark"],
+                        "Remark": "", "Corrective Action": "", "MEL/CDL Ref": "", "Completed At": "",
+                    })
+
+    records_df = pd.DataFrame(records)
+    csv_bytes = records_df.to_csv(index=False).encode("utf-8")
+    st.download_button(
+        "⬇️  Download Compliance Record (CSV)",
+        data=csv_bytes,
+        file_name=f"{st.session_state.crs_number}.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
 
     st.balloons()
 
