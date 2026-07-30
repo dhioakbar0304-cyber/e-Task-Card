@@ -602,14 +602,44 @@ st.markdown("""
 # ============================================================================
 if st.session_state.get("scroll_top"):
     st.session_state.scroll_top = False
-    components.html("""
+    _scroll_nonce = time.time()
+    components.html(f"""
         <script>
-            var doc = window.parent.document;
-            var target = doc.querySelector('section.main') || doc.querySelector('[data-testid="stAppViewContainer"]') || doc.scrollingElement;
-            if (target) { target.scrollTo({top: 0, behavior: 'smooth'}); }
-            if (window.parent) { window.parent.scrollTo({top: 0, behavior: 'smooth'}); }
+        // cache-buster so the browser always treats this as a fresh component
+        // and actually re-runs the script instead of reusing a cached iframe: {_scroll_nonce}
+        (function() {{
+            function scrollWinToTop(w) {{
+                try {{
+                    var doc = w.document;
+                    var selectors = [
+                        'section.main', '[data-testid="stMain"]', '[data-testid="stAppViewContainer"]',
+                        '[data-testid="stMainBlockContainer"]', '.main', '.block-container'
+                    ];
+                    selectors.forEach(function(sel) {{
+                        var el = doc.querySelector(sel);
+                        if (el) {{
+                            try {{ el.scrollTo({{top: 0, left: 0, behavior: 'smooth'}}); }} catch(e) {{}}
+                            el.scrollTop = 0;
+                        }}
+                    }});
+                    if (doc.documentElement) {{ doc.documentElement.scrollTop = 0; }}
+                    if (doc.body) {{ doc.body.scrollTop = 0; }}
+                    try {{ w.scrollTo({{top: 0, left: 0, behavior: 'smooth'}}); }} catch(e) {{}}
+                    w.scrollTo(0, 0);
+                }} catch (e) {{ /* cross-origin or unavailable — ignore */ }}
+            }}
+            function scrollAll() {{
+                try {{ if (window.parent) scrollWinToTop(window.parent); }} catch(e) {{}}
+                try {{ if (window.top) scrollWinToTop(window.top); }} catch(e) {{}}
+                scrollWinToTop(window);
+            }}
+            scrollAll();
+            [30, 100, 250, 450, 700].forEach(function(delay) {{
+                setTimeout(scrollAll, delay);
+            }});
+        }})();
         </script>
-    """, height=0)
+    """, height=1)
 
 st.markdown(f"""
     <div class="header-box">
