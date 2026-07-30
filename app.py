@@ -2,6 +2,15 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime
 import time
+import io
+
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.units import mm
+from reportlab.lib import colors
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.platypus import (
+    SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, KeepTogether
+)
 
 # ============================================================================
 # 1. PAGE CONFIGURATION
@@ -61,9 +70,10 @@ JOB_CARDS = {
     # ------------------------------------------------------------------ #
     "A320 Weekly Check": {
         "meta": {
-            "Work Order No.": "GMF-WO-2026-071842", "Task Card No.": "CT-2-01/A2-04",
-            "A/C Type": "A320", "A/C Registration": "PK-GLV", "Operator": "Citilink Indonesia",
-            "Station": "CGK", "Skill": "AP/EA", "Event / Interval": "Weekly (WY)",
+            "Work Order No.": "GMF-WO-2026-071842", "Crew": "1", "Down Time": "4 hrs",
+            "A/C Registration": "PK-GLV", "Event / Interval": "Weekly (WY)",
+            "Task Card No.": "CT-2-01/A2-04", "A/C Type": "A320", "Operator": "Citilink Indonesia",
+            "Station": "CGK", "Skill": "AP/EA",
             "ATA Reference": "05-20 / 11.02.04", "Planned Man-hours": "8.0",
         },
         "mode": "checklist",
@@ -266,9 +276,10 @@ JOB_CARDS = {
     # ------------------------------------------------------------------ #
     "Cabin Standard Check (24H)": {
         "meta": {
-            "Work Order No.": "GMF-WO-2026-071901", "Task Card No.": "CT-2-01/A2-09",
-            "A/C Type": "All", "A/C Registration": "PK-GLV", "Operator": "Citilink Indonesia",
-            "Station": "CGK", "Skill": "Cabin", "Event / Interval": "24 Hours",
+            "Work Order No.": "GMF-WO-2026-071901", "Crew": "1", "Down Time": "-",
+            "A/C Registration": "PK-GLV", "Event / Interval": "24 Hours",
+            "Task Card No.": "CT-2-01/A2-09", "A/C Type": "All", "Operator": "Citilink Indonesia",
+            "Station": "CGK", "Skill": "Cabin",
             "ATA Reference": "12.02.01", "Planned Man-hours": "-",
         },
         "mode": "checklist",
@@ -312,9 +323,10 @@ JOB_CARDS = {
     # ------------------------------------------------------------------ #
     "Daily Interior Cleaning": {
         "meta": {
-            "Work Order No.": "GMF-WO-2026-071955", "Task Card No.": "CT-2-01/A2-10",
-            "A/C Type": "All", "A/C Registration": "PK-GLV", "Operator": "Citilink Indonesia",
-            "Station": "CGK", "Skill": "Cabin", "Event / Interval": "Interior Cleaning",
+            "Work Order No.": "GMF-WO-2026-071955", "Crew": "9", "Down Time": "-",
+            "A/C Registration": "PK-GLV", "Event / Interval": "Interior Cleaning",
+            "Task Card No.": "CT-2-01/A2-10", "A/C Type": "All", "Operator": "Citilink Indonesia",
+            "Station": "CGK", "Skill": "Cabin",
             "ATA Reference": "14.02.98", "Planned Man-hours": "A320: 13.5 / B737: 9.0",
         },
         "mode": "checklist",
@@ -375,9 +387,10 @@ JOB_CARDS = {
     # ------------------------------------------------------------------ #
     "Emergency Equipment Checklist": {
         "meta": {
-            "Work Order No.": "GMF-WO-2026-072004", "Task Card No.": "Attachment CT-2-01",
-            "A/C Type": "A320", "A/C Registration": "PK-GLV", "Operator": "Citilink Indonesia",
-            "Station": "CGK", "Skill": "Cabin / AP-EA", "Event / Interval": "Per Effectivity",
+            "Work Order No.": "GMF-WO-2026-072004", "Crew": "-", "Down Time": "-",
+            "A/C Registration": "PK-GLV", "Event / Interval": "Per Effectivity",
+            "Task Card No.": "Attachment CT-2-01", "A/C Type": "A320", "Operator": "Citilink Indonesia",
+            "Station": "CGK", "Skill": "Cabin / AP-EA",
             "ATA Reference": "25-60 / 25-65 / 25-66", "Planned Man-hours": "-",
         },
         "mode": "equipment_log",
@@ -837,7 +850,266 @@ def render_navigator(sections, mode, current_idx):
                     st.rerun()
 
 # ============================================================================
+# 9. PDF GENERATOR — renders the completed task card as a filled-in PDF
+# ============================================================================
+def _esc(text):
+    if text is None:
+        return ""
+    return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+def _pdf_styles():
+    styles = getSampleStyleSheet()
+    styles.add(ParagraphStyle(name="GMFEyebrow", fontSize=8.5, leading=10,
+                               textColor=colors.HexColor("#0E5C8C"), fontName="Helvetica-Bold", spaceAfter=4))
+    styles.add(ParagraphStyle(name="GMFTitle", fontSize=15, leading=18,
+                               textColor=colors.HexColor("#0B1220"), fontName="Helvetica-Bold", spaceAfter=2))
+    styles.add(ParagraphStyle(name="GMFSection", fontSize=10.5, leading=13,
+                               textColor=colors.white, fontName="Helvetica-Bold"))
+    styles.add(ParagraphStyle(name="GMFCell", fontSize=8, leading=10, fontName="Helvetica"))
+    styles.add(ParagraphStyle(name="GMFCellBold", fontSize=8, leading=10, fontName="Helvetica-Bold"))
+    styles.add(ParagraphStyle(name="GMFNote", fontSize=8, leading=10.5, fontName="Helvetica-Oblique",
+                               textColor=colors.HexColor("#5B6B80")))
+    styles.add(ParagraphStyle(name="GMFCrsTitle", fontSize=10.5, leading=13, fontName="Helvetica-Bold",
+                               textColor=colors.HexColor("#0B4870")))
+    styles.add(ParagraphStyle(name="GMFCrsText", fontSize=8.5, leading=11.5, fontName="Helvetica-Oblique",
+                               textColor=colors.HexColor("#334155")))
+    return styles
+
+_ITEM_HEADER = ["Code", "Skill", "Description", "Status", "Remark / Value"]
+_ITEM_COL_WIDTHS = [16 * mm, 13 * mm, 80 * mm, 24 * mm, 41 * mm]
+
+def _status_hex(status):
+    if status in ("✅ PASS", "✅ Completed"):
+        return "148F5E"
+    if status == "❌ FAIL":
+        return "C5303A"
+    if status in ("⚠️ Not Inspected", "⚠️ Not Completed", None):
+        return "B8730F"
+    return "5B6B80"
+
+def _new_item_table_rows(styles):
+    return [[Paragraph(f"<b>{h}</b>", styles["GMFCellBold"]) for h in _ITEM_HEADER]]
+
+def _flush_item_rows(rows, flowables, styles):
+    if len(rows) > 1:
+        t = Table(rows, colWidths=_ITEM_COL_WIDTHS, repeatRows=1)
+        t.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#EEF2F7")),
+            ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#E4E9F0")),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 4), ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+            ("TOPPADDING", (0, 0), (-1, -1), 3), ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ]))
+        flowables.append(t)
+        flowables.append(Spacer(1, 6))
+    rows.clear()
+    rows.extend(_new_item_table_rows(styles))
+
+def build_pdf(job_card_type, card, staff, crs_number, submitted_at, station_final):
+    styles = _pdf_styles()
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=A4, topMargin=16 * mm, bottomMargin=16 * mm,
+                             leftMargin=15 * mm, rightMargin=15 * mm,
+                             title=f"GMF Digital Task Card - {job_card_type}")
+    story = []
+
+    # ---- Header ----
+    story.append(Paragraph("PT GMF AEROASIA TBK &mdash; APPROVED MAINTENANCE ORGANIZATION (CASR PART 145)", styles["GMFEyebrow"]))
+    story.append(Paragraph(f"Digital Task Card &mdash; {_esc(job_card_type)}", styles["GMFTitle"]))
+    story.append(Spacer(1, 6))
+
+    meta_items = list(card["meta"].items())
+    header_rows, row = [], []
+    for k, v in meta_items:
+        row.append(Paragraph(f"<b>{_esc(k)}</b><br/>{_esc(v)}", styles["GMFCell"]))
+        if len(row) == 3:
+            header_rows.append(row)
+            row = []
+    if row:
+        while len(row) < 3:
+            row.append(Paragraph("", styles["GMFCell"]))
+        header_rows.append(row)
+    header_table = Table(header_rows, colWidths=[58 * mm] * 3)
+    header_table.setStyle(TableStyle([
+        ("BOX", (0, 0), (-1, -1), 0.6, colors.HexColor("#E4E9F0")),
+        ("INNERGRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#E4E9F0")),
+        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F7F9FC")),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 6), ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+        ("TOPPADDING", (0, 0), (-1, -1), 5), ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+    ]))
+    story.append(header_table)
+    story.append(Spacer(1, 12))
+
+    sections = card["sections"]
+    mode = card.get("mode", "checklist")
+
+    if mode == "checklist":
+        for s in sections:
+            section_flow = []
+            title_tbl = Table([[Paragraph(f"{s['no']}. {_esc(s['title'])}", styles["GMFSection"])]], colWidths=[174 * mm])
+            title_tbl.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#0D1B2A")),
+                ("LEFTPADDING", (0, 0), (-1, -1), 8), ("TOPPADDING", (0, 0), (-1, -1), 5),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+            ]))
+            section_flow.append(title_tbl)
+            section_flow.append(Spacer(1, 4))
+
+            item_rows = _new_item_table_rows(styles)
+
+            for it in s["items"]:
+                kind = it["kind"]
+                if kind == "note":
+                    _flush_item_rows(item_rows, section_flow, styles)
+                    section_flow.append(Paragraph(f"&#8505; NOTE: {_esc(it['text'])}", styles["GMFNote"]))
+                    section_flow.append(Spacer(1, 4))
+                elif kind == "warning":
+                    _flush_item_rows(item_rows, section_flow, styles)
+                    section_flow.append(Paragraph(f"&#9888; WARNING: {_esc(it['text'])}", styles["GMFNote"]))
+                    section_flow.append(Spacer(1, 4))
+                elif kind == "check":
+                    code = it["code"]
+                    status = st.session_state.responses.get(code, "-")
+                    remark = st.session_state.remarks.get(code, "")
+                    action = st.session_state.responses.get(f"{code}__action", "")
+                    mel = st.session_state.responses.get(f"{code}__mel", "")
+                    extra_bits = []
+                    if remark:
+                        extra_bits.append(f"Remark: {remark}")
+                    if action:
+                        extra_bits.append(f"Action: {action}")
+                    if mel:
+                        extra_bits.append(f"MEL/CDL: {mel}")
+                    extra = " | ".join(extra_bits)
+                    item_rows.append([
+                        Paragraph(_esc(code), styles["GMFCell"]),
+                        Paragraph(_esc(it["skill"]), styles["GMFCell"]),
+                        Paragraph(_esc(it["desc"]), styles["GMFCell"]),
+                        Paragraph(f'<font color="#{_status_hex(status)}"><b>{_esc(status)}</b></font>', styles["GMFCell"]),
+                        Paragraph(_esc(extra), styles["GMFCell"]),
+                    ])
+                elif kind == "measurement":
+                    val = st.session_state.responses.get(it["code"])
+                    display_val = f"{val:g} {it['unit']}" if val is not None else "-"
+                    item_rows.append([
+                        Paragraph(_esc(it["code"]), styles["GMFCell"]),
+                        Paragraph(_esc(it["skill"]), styles["GMFCell"]),
+                        Paragraph(_esc(it["label"]), styles["GMFCell"]),
+                        Paragraph(_esc(display_val), styles["GMFCell"]),
+                        Paragraph("", styles["GMFCell"]),
+                    ])
+                elif kind == "finding":
+                    val = st.session_state.responses.get(it["code"], "NIL")
+                    status_txt = "NIL" if val == "NIL" else "FINDING"
+                    item_rows.append([
+                        Paragraph(_esc(it["code"]), styles["GMFCell"]),
+                        Paragraph(_esc(it["skill"]), styles["GMFCell"]),
+                        Paragraph(_esc(it["label"]), styles["GMFCell"]),
+                        Paragraph(_esc(status_txt), styles["GMFCell"]),
+                        Paragraph(_esc(val if val != "NIL" else ""), styles["GMFCell"]),
+                    ])
+                elif kind == "table":
+                    _flush_item_rows(item_rows, section_flow, styles)
+                    df = st.session_state.responses.get(it["code"])
+                    cols = it["columns"]
+                    sub_header = [Paragraph("", styles["GMFCellBold"])] + \
+                                 [Paragraph(f"<b>{_esc(c)}</b>", styles["GMFCellBold"]) for c in cols]
+                    sub_rows = [sub_header]
+                    for r in it["rows"]:
+                        vals = []
+                        for c in cols:
+                            v = df.loc[r, c] if (df is not None and r in df.index) else None
+                            vals.append("" if v is None or pd.isna(v) else f"{v:g}")
+                        sub_rows.append([Paragraph(_esc(r), styles["GMFCell"])] +
+                                         [Paragraph(_esc(v), styles["GMFCell"]) for v in vals])
+                    n_cols = len(cols) + 1
+                    label_col = 30 * mm
+                    other_col = (174 - 30) / len(cols)
+                    sub_table = Table(sub_rows, colWidths=[label_col] + [other_col * mm] * len(cols))
+                    sub_table.setStyle(TableStyle([
+                        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#EEF2F7")),
+                        ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#E4E9F0")),
+                        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                        ("LEFTPADDING", (0, 0), (-1, -1), 4), ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+                        ("TOPPADDING", (0, 0), (-1, -1), 3), ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+                    ]))
+                    section_flow.append(Paragraph(f"<b>{_esc(it['code'])}</b> &mdash; {_esc(it['label'])}", styles["GMFCellBold"]))
+                    section_flow.append(sub_table)
+                    section_flow.append(Spacer(1, 6))
+
+            _flush_item_rows(item_rows, section_flow, styles)
+            story.append(KeepTogether(section_flow[:2]))
+            story.extend(section_flow[2:])
+            story.append(Spacer(1, 8))
+    else:
+        for s in sections:
+            section_flow = []
+            title_tbl = Table([[Paragraph(_esc(s["title"]), styles["GMFSection"])]], colWidths=[174 * mm])
+            title_tbl.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#0D1B2A")),
+                ("LEFTPADDING", (0, 0), (-1, -1), 8), ("TOPPADDING", (0, 0), (-1, -1), 5),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+            ]))
+            section_flow.append(title_tbl)
+            section_flow.append(Spacer(1, 4))
+
+            df = st.session_state.responses.get(f"eq_{s['no']}")
+            eq_rows = [[Paragraph("<b>Equipment</b>", styles["GMFCellBold"]),
+                        Paragraph("<b>Description</b>", styles["GMFCellBold"]),
+                        Paragraph("<b>Remark</b>", styles["GMFCellBold"])]]
+            if df is not None:
+                for _, r in df.iterrows():
+                    eq_rows.append([
+                        Paragraph(_esc(r["Equipment"]), styles["GMFCell"]),
+                        Paragraph(_esc(r["Description"]), styles["GMFCell"]),
+                        Paragraph(_esc(r["Remark"]), styles["GMFCell"]),
+                    ])
+            eq_table = Table(eq_rows, colWidths=[45 * mm, 89 * mm, 40 * mm], repeatRows=1)
+            eq_table.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#EEF2F7")),
+                ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#E4E9F0")),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 4), ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+                ("TOPPADDING", (0, 0), (-1, -1), 3), ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+            ]))
+            section_flow.append(eq_table)
+            story.append(KeepTogether(section_flow[:2]))
+            story.extend(section_flow[2:])
+            story.append(Spacer(1, 8))
+
+    # ---- CRS / release block ----
+    story.append(Spacer(1, 6))
+    crs_rows = [
+        [Paragraph("CERTIFICATE OF RELEASE TO SERVICE (CRS)", styles["GMFCrsTitle"])],
+        [Paragraph(
+            'I certify that the work specified, except as otherwise stated, was carried out in accordance with the '
+            'applicable requirements of the Indonesian Civil Aviation Safety Regulations (CASR) Part 145, and in that '
+            'respect the aircraft / item is considered ready for release to service.', styles["GMFCrsText"])],
+        [Paragraph(
+            f'<b>CRS No.:</b> {_esc(crs_number)} &nbsp;&nbsp; <b>Station:</b> {_esc(station_final)} &nbsp;&nbsp; '
+            f'<b>Date/Time:</b> {_esc(submitted_at.strftime("%d %b %Y %H:%M WIB"))}', styles["GMFCell"])],
+        [Paragraph(
+            f'<b>Certifying Staff:</b> {_esc(staff.get("name", "-"))} &nbsp;&nbsp; '
+            f'<b>License:</b> {_esc(staff.get("license_no", "-"))} &nbsp;&nbsp; '
+            f'<b>Rating:</b> {_esc(staff.get("rating", "-"))}', styles["GMFCell"])],
+    ]
+    crs_table = Table(crs_rows, colWidths=[174 * mm])
+    crs_table.setStyle(TableStyle([
+        ("BOX", (0, 0), (-1, -1), 1, colors.HexColor("#3E93BE")),
+        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F5FAFD")),
+        ("LEFTPADDING", (0, 0), (-1, -1), 10), ("RIGHTPADDING", (0, 0), (-1, -1), 10),
+        ("TOPPADDING", (0, 0), (-1, -1), 8), ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+    ]))
+    story.append(crs_table)
+
+    doc.build(story)
+    buffer.seek(0)
+    return buffer.getvalue()
+
+# ============================================================================
 # STEP 0 — WORK ORDER / SELECT TASK CARD
+
 # ============================================================================
 if st.session_state.step == 0:
     st.markdown(f"<div class='sub-header'><span class='sh-icon'>{icon('file', 14)}</span>A. Work Order Details</div>", unsafe_allow_html=True)
@@ -1106,13 +1378,35 @@ elif st.session_state.step == 3:
 
     records_df = pd.DataFrame(records)
     csv_bytes = records_df.to_csv(index=False).encode("utf-8")
-    st.download_button(
-        "⬇️  Download Compliance Record (CSV)",
-        data=csv_bytes,
-        file_name=f"{st.session_state.crs_number}.csv",
-        mime="text/csv",
-        use_container_width=True,
-    )
+
+    try:
+        pdf_bytes = build_pdf(
+            st.session_state.job_card_type, card, staff,
+            st.session_state.crs_number, st.session_state.submitted_at, st.session_state.station_final
+        )
+    except Exception as e:
+        pdf_bytes = None
+        st.error(f"⚠️ Could not generate the PDF ({e}). The CSV record below is still available.")
+
+    col_pdf, col_csv = st.columns(2)
+    with col_pdf:
+        if pdf_bytes is not None:
+            st.download_button(
+                "📄  Download Filled Task Card (PDF)",
+                data=pdf_bytes,
+                file_name=f"{st.session_state.crs_number}.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+                type="primary",
+            )
+    with col_csv:
+        st.download_button(
+            "⬇️  Download Compliance Record (CSV)",
+            data=csv_bytes,
+            file_name=f"{st.session_state.crs_number}.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
 
     st.balloons()
 
