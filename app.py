@@ -1158,7 +1158,6 @@ def build_pdf(job_card_type, card, staff, crs_number, submitted_at, station_fina
 
 # ============================================================================
 # STEP 0 — WORK ORDER / SELECT TASK CARD
-
 # ============================================================================
 if st.session_state.step == 0:
     st.markdown(f"<div class='sub-header'><span class='sh-icon'>{icon('file', 14)}</span>A. Work Order Details</div>", unsafe_allow_html=True)
@@ -1167,27 +1166,37 @@ if st.session_state.step == 0:
     job_card_type = st.selectbox("Task Card Type", options=list(JOB_CARDS.keys()),
                                   index=list(JOB_CARDS.keys()).index(st.session_state.job_card_type))
     card = JOB_CARDS[job_card_type]
-    meta = dict(card["meta"])
 
-    operator = st.selectbox("Operator / Customer", options=OPERATORS,
-                             index=OPERATORS.index(meta.get("Operator", OPERATORS[0])) if meta.get("Operator") in OPERATORS else 0)
-    meta["Operator"] = operator
+    # Ambil meta bawaan template
+    default_meta = card["meta"]
 
-    cols = st.columns(2)
-    meta_items = [(k, v) for k, v in meta.items() if k != "Operator"]
-    half = (len(meta_items) + 1) // 2
-    for i, (k, v) in enumerate(meta_items):
-        with cols[0 if i < half else 1]:
-            st.text_input(k, value=v, disabled=True, key=f"meta_{job_card_type}_{k}")
-
-    st.markdown('</div>', unsafe_allow_html=True)
-
-    if job_card_type != st.session_state.job_card_type:
+    # Inisialisasi session_state untuk metadata jika belum ada atau jika template berubah
+    if "card_meta" not in st.session_state or st.session_state.job_card_type != job_card_type:
         st.session_state.job_card_type = job_card_type
+        st.session_state.card_meta = dict(default_meta)
         st.session_state.section_idx = 0
         st.session_state.responses = {}
         st.session_state.remarks = {}
         st.session_state.completed_at = {}
+
+    # Operator / Customer dropdown
+    operator = st.selectbox("Operator / Customer", options=OPERATORS,
+                            index=OPERATORS.index(st.session_state.card_meta.get("Operator", OPERATORS[0]))
+                            if st.session_state.card_meta.get("Operator") in OPERATORS else 0)
+    st.session_state.card_meta["Operator"] = operator
+
+    # Render sisanya sebagai Text Input yang BISA DIEDIT (disabled=False/dihapus)
+    meta_items = [(k, v) for k, v in st.session_state.card_meta.items() if k != "Operator"]
+    cols = st.columns(2)
+    half = (len(meta_items) + 1) // 2
+    
+    for i, (k, v) in enumerate(meta_items):
+        with cols[0 if i < half else 1]:
+            # Menghapus disabled=True dan menyimpannya langsung ke session_state saat diedit
+            new_val = st.text_input(k, value=v, key=f"meta_input_{job_card_type}_{k}")
+            st.session_state.card_meta[k] = new_val
+
+    st.markdown('</div>', unsafe_allow_html=True)
 
     n_sections = len(card["sections"])
     st.info(f"**{job_card_type}** contains **{n_sections} inspection pages**. Each page must be completed in full before the next page can be opened.")
