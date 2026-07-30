@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 from datetime import datetime
 import time
@@ -22,8 +23,8 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-STATUS_OPTIONS = ["⚠️ Not Inspected", "✅ PASS", "❌ FAIL", "➖ N/A"]
-CLEAN_STATUS_OPTIONS = ["⚠️ Not Completed", "✅ Completed", "➖ N/A"]
+STATUS_OPTIONS = ["Not Inspected", "PASS", "FAIL", "N/A"]
+CLEAN_STATUS_OPTIONS = ["Not Completed", "Completed", "N/A"]
 
 # Certifying staff directory — in production this should be pulled from GMF's
 # licensing / HR system (e.g. AMOS crew database), never hard-coded like this.
@@ -476,6 +477,7 @@ _defaults = {
     "staff_snapshot": None,
     "station_final": "CGK",
     "crs_number": None,
+    "scroll_top": False,
 }
 for k, v in _defaults.items():
     if k not in st.session_state:
@@ -598,6 +600,17 @@ st.markdown("""
 # ============================================================================
 # 7. HEADER + STEPPER
 # ============================================================================
+if st.session_state.get("scroll_top"):
+    st.session_state.scroll_top = False
+    components.html("""
+        <script>
+            var doc = window.parent.document;
+            var target = doc.querySelector('section.main') || doc.querySelector('[data-testid="stAppViewContainer"]') || doc.scrollingElement;
+            if (target) { target.scrollTo({top: 0, behavior: 'smooth'}); }
+            if (window.parent) { window.parent.scrollTo({top: 0, behavior: 'smooth'}); }
+        </script>
+    """, height=0)
+
 st.markdown(f"""
     <div class="header-box">
         <p class="header-eyebrow">PT GMF AeroAsia Tbk &middot; Approved Maintenance Organization</p>
@@ -628,7 +641,7 @@ def render_item(item):
         return True
 
     if kind == "warning":
-        st.warning(f"⚠️ {item['text']}")
+        st.warning(item["text"])
         return True
 
     if kind == "check":
@@ -646,14 +659,14 @@ def render_item(item):
         val = st.radio(f"Status {code}", options=item["status_options"], horizontal=True,
                         key=f"radio_{code}", label_visibility="collapsed")
         st.session_state.responses[code] = val
-        complete = val not in ("⚠️ Not Inspected", "⚠️ Not Completed")
+        complete = val not in ("Not Inspected", "Not Completed")
 
         if complete and code not in st.session_state.completed_at:
             st.session_state.completed_at[code] = datetime.now().strftime("%H:%M:%S")
         elif not complete:
             st.session_state.completed_at.pop(code, None)
 
-        if val == "❌ FAIL":
+        if val == "FAIL":
             remark = st.text_area("Finding remarks (required)", key=f"remark_{code}",
                                    placeholder="Describe the finding, condition, and corrective action taken...")
             st.session_state.remarks[code] = remark
@@ -796,9 +809,9 @@ def section_status(section, mode):
                 all_done = False
                 continue
             touched = True
-            if val in ("⚠️ Not Inspected", "⚠️ Not Completed"):
+            if val in ("Not Inspected", "Not Completed"):
                 all_done = False
-            if val == "❌ FAIL":
+            if val == "FAIL":
                 if not st.session_state.remarks.get(code, "").strip():
                     all_done = False
                 if st.session_state.responses.get(f"{code}__action") == "Deferred under MEL/CDL" \
@@ -828,25 +841,31 @@ def section_status(section, mode):
     return "done" if all_done else "partial"
 
 def render_navigator(sections, mode, current_idx):
-    with st.expander(f"📑 Task Card Navigator ({current_idx + 1} / {len(sections)})", expanded=False):
+    dot_color = {"current": "#0E5C8C", "done": "#148F5E", "partial": "#B8730F", "pending": "#CBD5E1"}
+    with st.expander(f"Task Card Navigator ({current_idx + 1} / {len(sections)})", expanded=False):
         st.caption("Jump back to any page you've already started to review or correct an entry. Pages ahead of your progress stay locked until the current page is complete.")
         for i, s in enumerate(sections):
             status = section_status(s, mode)
             if i == current_idx:
-                dot, label_extra = "🔵", " (current)"
+                dot_key, label_extra = "current", " (current)"
             elif status == "done":
-                dot, label_extra = "🟢", ""
+                dot_key, label_extra = "done", ""
             elif status == "partial":
-                dot, label_extra = "🟡", " (incomplete)"
+                dot_key, label_extra = "partial", " (incomplete)"
             else:
-                dot, label_extra = "⚪", ""
+                dot_key, label_extra = "pending", ""
             can_jump = (i <= current_idx) or status in ("done", "partial")
             cols = st.columns([0.08, 0.72, 0.2])
-            cols[0].markdown(dot)
+            cols[0].markdown(
+                f'<span style="display:inline-block;width:9px;height:9px;border-radius:50%;'
+                f'background:{dot_color[dot_key]};margin-top:6px;"></span>',
+                unsafe_allow_html=True
+            )
             cols[1].markdown(f"**{s['no']}. {s['title']}**{label_extra}")
             if i != current_idx and can_jump:
                 if cols[2].button("Go", key=f"nav_{i}", use_container_width=True):
                     st.session_state.section_idx = i
+                    st.session_state.scroll_top = True
                     st.rerun()
 
 # ============================================================================
@@ -879,11 +898,11 @@ _ITEM_HEADER = ["Code", "Skill", "Description", "Status", "Remark / Value"]
 _ITEM_COL_WIDTHS = [16 * mm, 13 * mm, 80 * mm, 24 * mm, 41 * mm]
 
 def _status_hex(status):
-    if status in ("✅ PASS", "✅ Completed"):
+    if status in ("PASS", "Completed"):
         return "148F5E"
-    if status == "❌ FAIL":
+    if status == "FAIL":
         return "C5303A"
-    if status in ("⚠️ Not Inspected", "⚠️ Not Completed", None):
+    if status in ("Not Inspected", "Not Completed", None):
         return "B8730F"
     return "5B6B80"
 
@@ -1141,10 +1160,11 @@ if st.session_state.step == 0:
         st.session_state.completed_at = {}
 
     n_sections = len(card["sections"])
-    st.info(f"📋 **{job_card_type}** contains **{n_sections} inspection pages**. Each page must be completed in full before the next page can be opened.")
+    st.info(f"**{job_card_type}** contains **{n_sections} inspection pages**. Each page must be completed in full before the next page can be opened.")
 
     if st.button("Start Inspection  →", use_container_width=True, type="primary"):
         st.session_state.step = 1
+        st.session_state.scroll_top = True
         st.rerun()
 
 # ============================================================================
@@ -1164,14 +1184,14 @@ elif st.session_state.step == 1:
     st.markdown(f"<div class='sub-header'><span class='sh-icon'>{icon(section.get('icon', 'clipboard'), 14)}</span>{section['no']}. {section['title']}</div>", unsafe_allow_html=True)
 
     if mode == "equipment_log":
-        st.markdown("🔒 The **Remark** column is required for every item of equipment (condition / expiry date / N/A).")
+        st.markdown("The **Remark** column is required for every item of equipment (condition / expiry date / N/A).")
         complete = render_equipment_section(section)
         if not complete:
-            st.warning("🚨 Some equipment rows still have an empty Remark. Complete them before continuing.")
+            st.warning("Some equipment rows still have an empty Remark. Complete them before continuing.")
     else:
         complete = render_checklist_section(section)
         if not complete:
-            st.warning("🚨 Some items on this page are not yet fully completed (including required finding remarks for FAIL status). All items must be completed before continuing.")
+            st.warning("Some items on this page are not yet fully completed (including required finding remarks for FAIL status). All items must be completed before continuing.")
 
     col_back, col_next = st.columns(2)
     with col_back:
@@ -1180,6 +1200,7 @@ elif st.session_state.step == 1:
                 st.session_state.step = 0
             else:
                 st.session_state.section_idx = idx - 1
+            st.session_state.scroll_top = True
             st.rerun()
     with col_next:
         is_last = idx == len(sections) - 1
@@ -1189,6 +1210,7 @@ elif st.session_state.step == 1:
                 st.session_state.step = 2
             else:
                 st.session_state.section_idx = idx + 1
+            st.session_state.scroll_top = True
             st.rerun()
 
 # ============================================================================
@@ -1203,7 +1225,7 @@ elif st.session_state.step == 2:
 
     if mode == "checklist":
         all_checks = [it for s in sections for it in s["items"] if it["kind"] == "check"]
-        fails = [it for it in all_checks if st.session_state.responses.get(it["code"]) == "❌ FAIL"]
+        fails = [it for it in all_checks if st.session_state.responses.get(it["code"]) == "FAIL"]
         findings = [it for s in sections for it in s["items"]
                     if it["kind"] == "finding" and st.session_state.responses.get(it["code"], "NIL") != "NIL"]
 
@@ -1233,12 +1255,12 @@ elif st.session_state.step == 2:
     with c2:
         st.text_input("Date / Time", value=datetime.now().strftime("%d %b %Y | %H:%M WIB"), disabled=True)
 
-    st.markdown("🔒 **Digital sign-off** — enter your GMF employee PIN in place of a wet-ink signature. The PIN automatically confirms your identity and licensing details.")
+    st.markdown("**Digital sign-off** — enter your GMF employee PIN in place of a wet-ink signature. The PIN automatically confirms your identity and licensing details.")
     pin_input = st.text_input("Certifying Staff PIN (demo: 1234 or 5678)", type="password", max_chars=4,
                                placeholder="••••", key="pin_field")
     staff = CERTIFYING_STAFF_DB.get(pin_input) if len(pin_input) == 4 else None
     if len(pin_input) == 4 and staff is None:
-        st.error("🚨 PIN not recognized in the system. Please confirm your employee PIN.")
+        st.error("PIN not recognized in the system. Please confirm your employee PIN.")
 
     declaration = False
     if staff:
@@ -1273,15 +1295,17 @@ elif st.session_state.step == 2:
         if st.button("←  Back to Last Page", use_container_width=True, type="secondary"):
             st.session_state.step = 1
             st.session_state.section_idx = len(sections) - 1
+            st.session_state.scroll_top = True
             st.rerun()
     with col_submit:
-        if st.button("📤  Submit &amp; Release", use_container_width=True, type="primary", disabled=not can_submit):
+        if st.button("Submit &amp; Release", use_container_width=True, type="primary", disabled=not can_submit):
             with st.spinner("Encrypting data and transmitting to the central server..."):
                 time.sleep(1.4)
             st.session_state.submitted_at = datetime.now()
             st.session_state.staff_snapshot = staff
             st.session_state.crs_number = f"{staff['auth_no']}-{datetime.now().strftime('%y%m%d%H%M')}"
             st.session_state.step = 3
+            st.session_state.scroll_top = True
             st.rerun()
 
 # ============================================================================
@@ -1294,13 +1318,13 @@ elif st.session_state.step == 3:
     staff = st.session_state.get("staff_snapshot") or {}
 
     st.markdown(f"<div class='sub-header'><span class='sh-icon'>{icon('stamp', 14)}</span>Task Card Released</div>", unsafe_allow_html=True)
-    st.success("✅ **TASK CARD SUCCESSFULLY SUBMITTED AND RELEASED TO SERVICE**")
+    st.success("**TASK CARD SUCCESSFULLY SUBMITTED AND RELEASED TO SERVICE**")
 
     if mode == "checklist":
         all_checks = [it for s in sections for it in s["items"] if it["kind"] == "check"]
-        pass_count = sum(1 for it in all_checks if st.session_state.responses.get(it["code"]) in ("✅ PASS", "✅ Completed"))
-        fail_count = sum(1 for it in all_checks if st.session_state.responses.get(it["code"]) == "❌ FAIL")
-        na_count = sum(1 for it in all_checks if st.session_state.responses.get(it["code"]) == "➖ N/A")
+        pass_count = sum(1 for it in all_checks if st.session_state.responses.get(it["code"]) in ("PASS", "Completed"))
+        fail_count = sum(1 for it in all_checks if st.session_state.responses.get(it["code"]) == "FAIL")
+        na_count = sum(1 for it in all_checks if st.session_state.responses.get(it["code"]) == "N/A")
         badges = f"""<span class="badge badge-pass">{pass_count} PASS/Completed</span>
             <span class="badge badge-fail">{fail_count} FAIL</span>
             <span class="badge badge-na">{na_count} N/A</span>"""
@@ -1386,13 +1410,13 @@ elif st.session_state.step == 3:
         )
     except Exception as e:
         pdf_bytes = None
-        st.error(f"⚠️ Could not generate the PDF ({e}). The CSV record below is still available.")
+        st.error(f"Could not generate the PDF ({e}). The CSV record below is still available.")
 
     col_pdf, col_csv = st.columns(2)
     with col_pdf:
         if pdf_bytes is not None:
             st.download_button(
-                "📄  Download Filled Task Card (PDF)",
+                "Download Filled Task Card (PDF)",
                 data=pdf_bytes,
                 file_name=f"{st.session_state.crs_number}.pdf",
                 mime="application/pdf",
@@ -1401,7 +1425,7 @@ elif st.session_state.step == 3:
             )
     with col_csv:
         st.download_button(
-            "⬇️  Download Compliance Record (CSV)",
+            "Download Compliance Record (CSV)",
             data=csv_bytes,
             file_name=f"{st.session_state.crs_number}.csv",
             mime="text/csv",
@@ -1410,6 +1434,7 @@ elif st.session_state.step == 3:
 
     st.balloons()
 
-    if st.button("＋  Create New Task Card", use_container_width=True, type="primary"):
+    if st.button("+ Create New Task Card", use_container_width=True, type="primary"):
         reset_all()
+        st.session_state.scroll_top = True
         st.rerun()
