@@ -4,6 +4,7 @@ import pandas as pd
 from datetime import datetime
 import time
 import io
+import re
 
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
@@ -25,6 +26,17 @@ st.set_page_config(
 
 STATUS_OPTIONS = ["Not Inspected", "PASS", "FAIL", "N/A"]
 CLEAN_STATUS_OPTIONS = ["Not Completed", "Completed", "N/A"]
+
+# Header fields that were most often left blank on paper task cards
+# (see Chapter III analysis). The prototype refuses to start an inspection
+# until these are filled in.
+REQUIRED_META = ["Work Order No.", "Task Card No.", "Crew", "Down Time", "A/C Registration"]
+META_HINTS = {
+    "Crew": "e.g. 2 (use 0 if not applicable)",
+    "Down Time": "e.g. 4 hrs (use 0 if not applicable)",
+    "A/C Registration": "e.g. PK-GLV",
+}
+REG_PATTERN = r"^PK-[A-Z]{3}$"
 
 # Certifying staff directory — in production this should be pulled from GMF's
 # licensing / HR system (e.g. AMOS crew database), never hard-coded like this.
@@ -71,8 +83,8 @@ JOB_CARDS = {
     # ------------------------------------------------------------------ #
     "A320 Weekly Check": {
         "meta": {
-            "Work Order No.": "GMF-WO-2026-071842", "Crew": "1", "Down Time": "4 hrs",
-            "A/C Registration": "PK-GLV", "Event / Interval": "Weekly (WY)",
+            "Work Order No.": "GMF-WO-2026-071842", "Crew": "", "Down Time": "",
+            "A/C Registration": "", "Event / Interval": "Weekly (WY)",
             "Task Card No.": "CT-2-01/A2-04", "A/C Type": "A320", "Operator": "Citilink Indonesia",
             "Station": "CGK", "Skill": "AP/EA",
             "ATA Reference": "05-20 / 11.02.04", "Planned Man-hours": "8.0",
@@ -277,8 +289,8 @@ JOB_CARDS = {
     # ------------------------------------------------------------------ #
     "Cabin Standard Check (24H)": {
         "meta": {
-            "Work Order No.": "GMF-WO-2026-071901", "Crew": "1", "Down Time": "-",
-            "A/C Registration": "PK-GLV", "Event / Interval": "24 Hours",
+            "Work Order No.": "GMF-WO-2026-071901", "Crew": "", "Down Time": "",
+            "A/C Registration": "", "Event / Interval": "24 Hours",
             "Task Card No.": "CT-2-01/A2-09", "A/C Type": "All", "Operator": "Citilink Indonesia",
             "Station": "CGK", "Skill": "Cabin",
             "ATA Reference": "12.02.01", "Planned Man-hours": "-",
@@ -324,8 +336,8 @@ JOB_CARDS = {
     # ------------------------------------------------------------------ #
     "Daily Interior Cleaning": {
         "meta": {
-            "Work Order No.": "GMF-WO-2026-071955", "Crew": "9", "Down Time": "-",
-            "A/C Registration": "PK-GLV", "Event / Interval": "Interior Cleaning",
+            "Work Order No.": "GMF-WO-2026-071955", "Crew": "", "Down Time": "",
+            "A/C Registration": "", "Event / Interval": "Interior Cleaning",
             "Task Card No.": "CT-2-01/A2-10", "A/C Type": "All", "Operator": "Citilink Indonesia",
             "Station": "CGK", "Skill": "Cabin",
             "ATA Reference": "14.02.98", "Planned Man-hours": "A320: 13.5 / B737: 9.0",
@@ -388,8 +400,8 @@ JOB_CARDS = {
     # ------------------------------------------------------------------ #
     "Emergency Equipment Checklist": {
         "meta": {
-            "Work Order No.": "GMF-WO-2026-072004", "Crew": "-", "Down Time": "-",
-            "A/C Registration": "PK-GLV", "Event / Interval": "Per Effectivity",
+            "Work Order No.": "GMF-WO-2026-072004", "Crew": "", "Down Time": "",
+            "A/C Registration": "", "Event / Interval": "Per Effectivity",
             "Task Card No.": "Attachment CT-2-01", "A/C Type": "A320", "Operator": "Citilink Indonesia",
             "Station": "CGK", "Skill": "Cabin / AP-EA",
             "ATA Reference": "25-60 / 25-65 / 25-66", "Planned Man-hours": "-",
@@ -482,12 +494,20 @@ _defaults = {
 for k, v in _defaults.items():
     if k not in st.session_state:
         st.session_state[k] = v
+if "register" not in st.session_state:
+    st.session_state["register"] = []      # in-session register of released cards
+if "last_registered" not in st.session_state:
+    st.session_state["last_registered"] = None
 
 def reset_all():
+    keep_register = st.session_state.get("register", [])
+    keep_last = st.session_state.get("last_registered")
     for k in list(st.session_state.keys()):
         del st.session_state[k]
     for k, v in _defaults.items():
         st.session_state[k] = v
+    st.session_state["register"] = keep_register
+    st.session_state["last_registered"] = keep_last
 
 # ============================================================================
 # 6. DESIGN SYSTEM
@@ -645,7 +665,7 @@ st.markdown(f"""
     <div class="header-box">
         <p class="header-eyebrow">PT GMF AeroAsia Tbk &middot; Approved Maintenance Organization</p>
         <h2 class="header-title">{icon('clipboard', 19, '#FFFFFF')} Digital Task Card System</h2>
-        <p class="header-sub">Paper task cards CT-2-01/A2-04, A2-09, A2-10 and Attachment CT-2-01, fully digitized — no page or sign-off can be skipped.</p>
+        <p class="header-sub">Demonstration prototype. The A320 Weekly Check template (CT-2-01/A2-04) is modelled on a physical Citilink task card; the other templates are simulations. No page or sign-off can be skipped.</p>
         <div class="header-foot">CASR Part 145 &middot; Member of Garuda Indonesia Group</div>
     </div>
 """, unsafe_allow_html=True)
@@ -954,7 +974,7 @@ def _flush_item_rows(rows, flowables, styles):
     rows.clear()
     rows.extend(_new_item_table_rows(styles))
 
-def build_pdf(job_card_type, card, staff, crs_number, submitted_at, station_final):
+def build_pdf(job_card_type, card, staff, crs_number, submitted_at, station_final, meta=None):
     styles = _pdf_styles()
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=A4, topMargin=16 * mm, bottomMargin=16 * mm,
@@ -967,10 +987,10 @@ def build_pdf(job_card_type, card, staff, crs_number, submitted_at, station_fina
     story.append(Paragraph(f"Digital Task Card &mdash; {_esc(job_card_type)}", styles["GMFTitle"]))
     story.append(Spacer(1, 6))
 
-    meta_items = list(card["meta"].items())
+    meta_items = list((meta or card["meta"]).items())
     header_rows, row = [], []
     for k, v in meta_items:
-        row.append(Paragraph(f"<b>{_esc(k)}</b><br/>{_esc(v)}", styles["GMFCell"]))
+        row.append(Paragraph(f"<b>{_esc(k)}</b><br/>{_esc(v) if str(v).strip() else '-'}", styles["GMFCell"]))
         if len(row) == 3:
             header_rows.append(row)
             row = []
@@ -1152,6 +1172,11 @@ def build_pdf(job_card_type, card, staff, crs_number, submitted_at, station_fina
     ]))
     story.append(crs_table)
 
+    story.append(Spacer(1, 8))
+    story.append(Paragraph(
+        "<i>Generated by a demonstration prototype (simulation). This document is not an official "
+        "GMF AeroAsia task card or Certificate of Release to Service.</i>", styles["GMFCell"]))
+
     doc.build(story)
     buffer.seek(0)
     return buffer.getvalue()
@@ -1193,15 +1218,40 @@ if st.session_state.step == 0:
     for i, (k, v) in enumerate(meta_items):
         with cols[0 if i < half else 1]:
             # Menghapus disabled=True dan menyimpannya langsung ke session_state saat diedit
-            new_val = st.text_input(k, value=v, key=f"meta_input_{job_card_type}_{k}")
+            new_val = st.text_input(k, value=v, key=f"meta_input_{job_card_type}_{k}",
+                                    placeholder=META_HINTS.get(k, ""))
             st.session_state.card_meta[k] = new_val
 
     st.markdown('</div>', unsafe_allow_html=True)
 
     n_sections = len(card["sections"])
     st.info(f"**{job_card_type}** contains **{n_sections} inspection pages**. Each page must be completed in full before the next page can be opened.")
+    st.caption("Template provenance: A320 Weekly Check is modelled on a physical Citilink task card. "
+               "Cabin Standard Check, Daily Interior Cleaning and Emergency Equipment Checklist are simulated templates.")
 
-    if st.button("Start Inspection  →", use_container_width=True, type="primary"):
+    # ---- Validate the header fields that are most often left blank ----
+    problems = []
+    for _k in REQUIRED_META:
+        if not str(st.session_state.card_meta.get(_k, "")).strip():
+            problems.append(f"{_k} is required")
+    _reg = str(st.session_state.card_meta.get("A/C Registration", "")).strip().upper()
+    if _reg and not re.match(REG_PATTERN, _reg):
+        problems.append("A/C Registration must use the format PK-XXX (e.g. PK-GLV)")
+    if _reg:
+        st.session_state.card_meta["A/C Registration"] = _reg
+    if problems:
+        st.warning("Complete the following before starting the inspection:\n\n- " + "\n- ".join(problems))
+
+    # ---- Register of task cards released in this browser session ----
+    if st.session_state.register:
+        with st.expander(f"Register of released task cards in this session ({len(st.session_state.register)})"):
+            _reg_df = pd.DataFrame(st.session_state.register)
+            st.dataframe(_reg_df, use_container_width=True, hide_index=True)
+            st.download_button("Download register (CSV)", data=_reg_df.to_csv(index=False).encode("utf-8"),
+                               file_name="task_card_register.csv", mime="text/csv")
+            st.caption("The register is kept only while this browser session stays open. There is no database yet.")
+
+    if st.button("Start Inspection  →", use_container_width=True, type="primary", disabled=bool(problems)):
         st.session_state.step = 1
         st.session_state.scroll_top = True
         st.rerun()
@@ -1295,6 +1345,7 @@ elif st.session_state.step == 2:
         st.text_input("Date / Time", value=datetime.now().strftime("%d %b %Y | %H:%M WIB"), disabled=True)
 
     st.markdown("**Digital sign-off** — enter your GMF employee PIN in place of a wet-ink signature. The PIN automatically confirms your identity and licensing details.")
+    st.caption("Simulation: the PIN directory and certifying staff are sample data, not connected to any GMF system.")
     pin_input = st.text_input("Certifying Staff PIN (demo: 1234 or 5678)", type="password", max_chars=4,
                                placeholder="••••", key="pin_field")
     staff = CERTIFYING_STAFF_DB.get(pin_input) if len(pin_input) == 4 else None
@@ -1338,7 +1389,7 @@ elif st.session_state.step == 2:
             st.rerun()
     with col_submit:
         if st.button("Submit &amp; Release", use_container_width=True, type="primary", disabled=not can_submit):
-            with st.spinner("Encrypting data and transmitting to the central server..."):
+            with st.spinner("Processing (simulation)..."):
                 time.sleep(1.4)
             st.session_state.submitted_at = datetime.now()
             st.session_state.staff_snapshot = staff
@@ -1357,7 +1408,7 @@ elif st.session_state.step == 3:
     staff = st.session_state.get("staff_snapshot") or {}
 
     st.markdown(f"<div class='sub-header'><span class='sh-icon'>{icon('stamp', 14)}</span>Task Card Released</div>", unsafe_allow_html=True)
-    st.success("**TASK CARD SUCCESSFULLY SUBMITTED AND RELEASED TO SERVICE**")
+    st.success("**TASK CARD SUBMITTED (DEMONSTRATION) - THIS IS A SIMULATION, NOT AN OFFICIAL RELEASE**")
 
     if mode == "checklist":
         all_checks = [it for s in sections for it in s["items"] if it["kind"] == "check"]
@@ -1383,10 +1434,34 @@ elif st.session_state.step == 3:
                 <div class="crs-title">Certificate of Release to Service</div>
                 <p class="crs-text" style="margin-bottom:8px;">CRS No. <span class="mono" style="font-style:normal; font-weight:700; color:#0B1220;">{st.session_state.crs_number}</span></p>
                 <p class="crs-text">Digitally certified by <b style="color:#0B1220; font-style:normal;">{staff.get('name', '-')}</b>
-                ({staff.get('license_no', '-')}). Aircraft status has been automatically updated in the GMF Command Center dashboard.</p>
+                ({staff.get('license_no', '-')}). Demonstration mode: no data is sent to any GMF system and no aircraft status is updated.</p>
             </div>
         </div>
     """, unsafe_allow_html=True)
+
+    # ---- Add this card to the session register (once per released card) ----
+    if st.session_state.get("last_registered") != st.session_state.crs_number:
+        _meta = st.session_state.get("card_meta", {})
+        if mode == "checklist":
+            _checks = [it for s_ in sections for it in s_["items"] if it["kind"] == "check"]
+            _pass = sum(1 for it in _checks if st.session_state.responses.get(it["code"]) in ("PASS", "Completed"))
+            _fail = sum(1 for it in _checks if st.session_state.responses.get(it["code"]) == "FAIL")
+            _na = sum(1 for it in _checks if st.session_state.responses.get(it["code"]) == "N/A")
+            _finds = sum(1 for s_ in sections for it in s_["items"]
+                         if it["kind"] == "finding" and st.session_state.responses.get(it["code"], "NIL") != "NIL")
+        else:
+            _pass = _fail = _na = _finds = 0
+        st.session_state.register.append({
+            "CRS No.": st.session_state.crs_number,
+            "Task Card": st.session_state.job_card_type,
+            "Operator": _meta.get("Operator", ""),
+            "A/C Registration": _meta.get("A/C Registration", ""),
+            "Crew": _meta.get("Crew", ""),
+            "Down Time": _meta.get("Down Time", ""),
+            "PASS/Completed": _pass, "FAIL": _fail, "N/A": _na, "Findings": _finds,
+            "Released": st.session_state.submitted_at.strftime("%d %b %Y %H:%M"),
+        })
+        st.session_state.last_registered = st.session_state.crs_number
 
     # ---- Build a downloadable compliance record (CSV) ----
     records = []
@@ -1440,12 +1515,20 @@ elif st.session_state.step == 3:
                     })
 
     records_df = pd.DataFrame(records)
+    _m = st.session_state.get("card_meta", {})
+    for _i, (_col, _val) in enumerate([
+        ("Task Card", st.session_state.job_card_type), ("Operator", _m.get("Operator", "")),
+        ("A/C Registration", _m.get("A/C Registration", "")), ("Crew", _m.get("Crew", "")),
+        ("Down Time", _m.get("Down Time", "")), ("Work Order No.", _m.get("Work Order No.", "")),
+    ]):
+        records_df.insert(_i, _col, _val)
     csv_bytes = records_df.to_csv(index=False).encode("utf-8")
 
     try:
         pdf_bytes = build_pdf(
             st.session_state.job_card_type, card, staff,
-            st.session_state.crs_number, st.session_state.submitted_at, st.session_state.station_final
+            st.session_state.crs_number, st.session_state.submitted_at, st.session_state.station_final,
+            meta=st.session_state.get("card_meta")
         )
     except Exception as e:
         pdf_bytes = None
